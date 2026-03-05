@@ -1,0 +1,35 @@
+afdb_version: 4
+bigquery_table: "bigquery-public-data.deepmind_alphafold.metadata"
+gcs_bucket_prefix: "gs://public-datasets-deepmind-alphafold-v4/"
+output_prefix: "./output/smoke_test/"
+
+filters:
+  skip_fragments: true
+  global_mean_plddt_min: 90.0     # very high threshold -> fewer entries
+  residue_plddt_min: 70.0
+  max_seq_len: 100                # only short proteins
+  require_single_chain: true
+  canonical_residue_policy: "map_to_unk"
+
+contacts:
+  cutoff_angstrom: 4.0
+  exclude_adjacent_residues: true
+  heavy_atoms_only: true
+  max_contacts_per_doc: 2048
+  tie_break: "lex_atom_names"
+
+splits:
+  mode: "afdb50"
+  seed: "contactdoc-v1"
+  train_frac: 0.98
+  val_frac: 0.01
+  test_frac: 0.01
+
+cluster_files:
+  afdb50_rep_mem_tsv_gz: ""
+  structural_rep_mem_tsv_gz: ""
+
+parallelism:
+  shard_size_entries: 50
+  num_workers_local: 4
+  use_modal: false
