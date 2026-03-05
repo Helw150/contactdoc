@@ -44,8 +44,7 @@ Emit residues as 3-letter uppercase inside angle brackets:
 <LEU> <LYS> <MET> <PHE> <PRO> <SER> <THR> <TRP> <TYR> <VAL>
 
 Policy for noncanonical residues:
-- v1 default: skip entry
-- optional: map to <UNK> (not default)
+- map to <UNK>
 
 ### 1.2 Position tokens
 Local 1-based indices:
