@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-"""CLI: config -> BigQuery -> manifest shards."""
+"""CLI: config -> BigQuery -> manifest shards.
+
+Streams rows from BigQuery, filters by cluster membership on-the-fly,
+and writes manifest shards incrementally. Never holds all rows in memory.
+"""
 
 import click
 
 from contactdoc.afdb_query import run_selection_query
 from contactdoc.clusters import load_afdb50_mapping, load_structural_mapping
 from contactdoc.config import config_sha, load_config
-from contactdoc.manifest import enrich_entries, write_manifest_shards
+from contactdoc.manifest import StreamingManifestWriter, enrich_entry
 
 
 @click.command()
@@ -40,19 +44,33 @@ def main(config_path: str, output_dir: str | None, limit: int | None):
     struct_cluster_map = load_structural_mapping(cfg.cluster_files.structural_rep_mem_tsv_gz)
     click.echo(f"Loaded {len(struct_cluster_map)} structural cluster members")
 
-    # Run BigQuery selection
+    # Run BigQuery selection — returns an iterator, not a list
     click.echo("Running BigQuery selection query...")
-    entries = run_selection_query(cfg, limit=limit)
-    click.echo(f"Selected {len(entries)} entries from BigQuery")
+    rows = run_selection_query(cfg, limit=limit)
 
-    # Enrich with clusters + split (drops entries not in both cluster files)
-    enriched, dropped = enrich_entries(entries, seq_cluster_map, struct_cluster_map, cfg)
-    click.echo(f"Kept {len(enriched)} entries with cluster assignments, dropped {dropped} missing from cluster files")
-
-    # Write manifest shards
+    # Stream rows, filter by cluster membership, write manifest shards
     if output_dir is None:
         output_dir = f"{cfg.output_prefix}config_sha={sha}/manifests"
-    paths = write_manifest_shards(enriched, output_dir, cfg.parallelism.shard_size_entries)
+    writer = StreamingManifestWriter(output_dir, cfg.parallelism.shard_size_entries)
+
+    total = 0
+    kept = 0
+    dropped = 0
+    for row in rows:
+        total += 1
+        entry = dict(row)
+        enriched = enrich_entry(entry, seq_cluster_map, struct_cluster_map, cfg)
+        if enriched is not None:
+            writer.add(enriched)
+            kept += 1
+        else:
+            dropped += 1
+
+        if total % 1_000_000 == 0:
+            click.echo(f"  Processed {total:,} rows, kept {kept:,}, dropped {dropped:,}")
+
+    paths = writer.finish()
+    click.echo(f"Done: {total:,} rows from BigQuery, kept {kept:,}, dropped {dropped:,}")
     click.echo(f"Wrote {len(paths)} manifest shards to {output_dir}")
 
 

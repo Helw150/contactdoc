@@ -28,19 +28,20 @@ SELECT
     globalMetricValue,
     uniprotStart,
     uniprotEnd,
-    uniprotSequence,
     LENGTH(uniprotSequence) AS seq_len
 FROM `{cfg.bigquery_table}`
-WHERE {where}
-ORDER BY entryId{limit_clause}
+WHERE {where}{limit_clause}
 """
 
 
-def run_selection_query(cfg: PipelineConfig, limit: int | None = None) -> list[dict]:
-    """Execute the selection query and return rows as list of dicts."""
+def run_selection_query(cfg: PipelineConfig, limit: int | None = None):
+    """Execute the selection query and return a row iterator.
+
+    Returns an iterator of Row objects (dict-like) to avoid loading
+    all results into memory at once.
+    """
     from google.cloud import bigquery
 
     client = bigquery.Client()
     query = build_selection_query(cfg, limit=limit)
-    rows = client.query(query).result()
-    return [dict(row) for row in rows]
+    return client.query(query).result()
