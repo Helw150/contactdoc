@@ -21,9 +21,11 @@ Contacts are heavy-atom pairs within a distance cutoff (default 4.0 A), one per 
 The pipeline:
 
 1. **Select** AFDB entries via BigQuery (filter by pLDDT, sequence length, fragment status)
-2. **Download** mmCIF structures from Google Cloud Storage
-3. **Parse** with Gemmi, compute contacts via NeighborSearch/ContactSearch
-4. **Serialize** to sharded, gzipped text + JSONL metadata + JSONL error logs
+2. **Download** mmCIF structures from GCS into a **Parquet dataset** (local cache with splits)
+3. **Generate** documents from Parquet — parse with Gemmi, compute contacts, serialize (no GCS needed)
+4. **Tokenize** into HuggingFace Arrow format for training
+
+The Parquet intermediate (step 2) stores raw mmCIF text with metadata and cluster-based splits. Once downloaded, you can re-run document generation with different parameters (cutoffs, contact limits, etc.) without re-downloading from GCS.
 
 See [SPEC.md](SPEC.md) for the full design specification.
 
@@ -101,9 +103,8 @@ Download both files from the [Steinegger lab AFDB cluster page](https://afdb-clu
 
 ```bash
 mkdir -p data
-# Download these two files into data/:
-#   File 7: 7-AFDB50-repId_memId.tsv.gz                    (1.2 GB) — sequence clusters (50% identity)
-#   File 5: 5-allmembers-repId-entryId-cluFlag-taxId.tsv.gz (1.6 GB) — all members with cluster flags
+wget -P data/ https://afdb-cluster.steineggerlab.workers.dev/v3/7-AFDB50-repId_memId.tsv.gz
+wget -P data/ https://afdb-cluster.steineggerlab.workers.dev/v3/5-allmembers-repId-entryId-cluFlag-taxId.tsv.gz
 ```
 
 The pipeline uses **both** cluster types:
@@ -140,30 +141,59 @@ uv run python scripts/bq_make_manifest.py \
   --limit 500
 ```
 
-### Stage 2: Process Manifest Shards
+### Stage 2: Download CIFs to Parquet
 
-Process all manifest shards in parallel — this downloads each CIF from GCS, parses it with Gemmi, computes contacts, and writes gzipped output shards:
+Download all mmCIF files from GCS and store them in sharded Parquet files with metadata and split assignments:
 
 ```bash
 uv run python scripts/run_local.py \
-  --config config/default.yaml \
+  --stage download \
   --manifest-dir output/manifests \
-  --output-dir output/results \
-  --use-gcs \
-  --workers 16
+  --output-dir output/parquet \
+  --workers 32
 ```
 
-Adjust `--workers` based on your machine's cores and network bandwidth. Each worker processes one manifest shard independently.
+This creates one Parquet file per manifest shard. Each row contains:
 
-To process a single shard (useful for debugging):
+| Column | Type | Description |
+|--------|------|-------------|
+| `entry_id` | string | AFDB entry ID (e.g. `AF-A0A1C0V126-F1`) |
+| `uniprot_accession` | string | UniProt accession |
+| `tax_id` | int64 | NCBI taxonomy ID |
+| `organism_name` | string | Scientific name |
+| `global_plddt` | float32 | Global mean pLDDT |
+| `seq_len` | int32 | Sequence length |
+| `seq_cluster_id` | string | AFDB50 sequence cluster representative |
+| `struct_cluster_id` | string | Structural cluster representative |
+| `split` | string | `train`, `val`, or `test` |
+| `gcs_uri` | string | Original GCS URI |
+| `cif_content` | string | Raw mmCIF file text |
+
+The Parquet dataset is the canonical local cache — all downstream analyses read from it.
+
+### Stage 3: Generate Documents from Parquet
+
+Generate ContactDoc documents from the local Parquet dataset (no GCS access needed):
 
 ```bash
-uv run python scripts/process_manifest_shard.py \
+uv run python scripts/run_local.py \
+  --stage generate \
   --config config/default.yaml \
-  --manifest-shard output/manifests/manifest_shard_000000.jsonl \
-  --shard-index 0 \
+  --parquet-dir output/parquet \
   --output-dir output/results \
-  --use-gcs
+  --workers 32
+```
+
+This parses CIF content from Parquet, computes contacts, and writes gzipped output shards. Much faster than the original pipeline since there's no network I/O.
+
+To process a single Parquet shard (useful for debugging):
+
+```bash
+uv run python scripts/generate_docs.py \
+  --config config/default.yaml \
+  --parquet-shard output/parquet/shard_000000.parquet \
+  --shard-index 0 \
+  --output-dir output/results
 ```
 
 ### Output Structure
@@ -187,6 +217,19 @@ output/results/
 - **txt.gz** — concatenated documents, each ending with `<end>\n`
 - **metadata.jsonl.gz** — per-document metadata (entry ID, pLDDT, contact count, split, SHA1 of document text, etc.)
 - **errors.jsonl.gz** — entries that were skipped (parse failures, no contacts after filtering, etc.)
+
+### Legacy: One-Step Process (download + generate combined)
+
+The original single-step pipeline is still available:
+
+```bash
+uv run python scripts/run_local.py \
+  --stage process \
+  --config config/default.yaml \
+  --manifest-dir output/manifests \
+  --output-dir output/results \
+  --use-gcs --workers 16
+```
 
 ### Cluster-Based Splits
 
@@ -256,23 +299,30 @@ uv run python scripts/bq_make_manifest.py \
   --config config/default.yaml \
   --output-dir /data/tim/contactdoc/manifests
 
-# 3. Process all shards (download CIFs from GCS, parse, compute contacts, serialize)
+# 3. Download CIFs to Parquet (local cache of all structures with splits)
 #    Takes ~18-40 hours depending on network speed. GCP auth may expire mid-run.
 uv run python scripts/run_local.py \
-  --config config/default.yaml \
+  --stage download \
   --manifest-dir /data/tim/contactdoc/manifests \
-  --output-dir /data/tim/contactdoc/results \
-  --use-gcs \
+  --output-dir /data/tim/contactdoc/parquet \
   --workers 32
 
-# 4. Tokenize into Arrow dataset (contacts capped at 1x sequence length)
+# 4. Generate documents from Parquet (no GCS needed, CPU-bound, much faster)
+uv run python scripts/run_local.py \
+  --stage generate \
+  --config config/default.yaml \
+  --parquet-dir /data/tim/contactdoc/parquet \
+  --output-dir /data/tim/contactdoc/results \
+  --workers 32
+
+# 5. Tokenize into Arrow dataset (contacts capped at 1x sequence length)
 uv run python scripts/build_dataset.py \
   --input-dir /data/tim/contactdoc/results \
   --output-dir /data/tim/contactdoc/dataset \
   --max-contacts-ratio 1.0
 ```
 
-**Note:** GCP application-default credentials expire after ~1 hour of inactivity or ~12 hours total. If shard processing fails partway through due to auth expiry, re-authenticate and use `--retry-list` or `--retry-from` to resume (see above).
+**Note:** GCP application-default credentials expire after ~1 hour of inactivity or ~12 hours total. If the download stage fails partway through due to auth expiry, re-authenticate and use `--retry-list` or `--retry-from` to resume (see above). The generate stage reads from local Parquet and does not need GCP credentials.
 
 ## Configuration
 
