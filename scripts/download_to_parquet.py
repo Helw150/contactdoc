@@ -94,7 +94,7 @@ def main(manifest_shard: str, shard_index: int, output_dir: str):
     if rows["entry_id"]:
         table = pa.table(rows, schema=SCHEMA)
         parquet_path = output_path / f"shard_{shard_index:06d}.parquet"
-        pq.write_table(table, parquet_path, compression="zstd")
+        pq.write_table(table, parquet_path, compression="zstd", compression_level=12)
 
     # Write errors sidecar
     if errors:
