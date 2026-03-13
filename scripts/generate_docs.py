@@ -3,9 +3,11 @@
 
 Uses the generator registry to select a document generation scheme.
 Multiple input shards can be merged into a single output shard.
+Output is written as Parquet files with document text and metadata.
 """
 
 import traceback
+from pathlib import Path
 
 import click
 import pyarrow.parquet as pq
@@ -14,18 +16,13 @@ from contactdoc.cif_parse import extract_residues, parse_cif
 from contactdoc.config import load_config
 from contactdoc.generators import get_generator
 from contactdoc.io import ShardWriter
-from contactdoc.serialize import (
-    make_error_record,
-    make_metadata_record,
-    metadata_to_jsonl,
-    error_to_jsonl,
-)
+from contactdoc.serialize import make_error_record, make_metadata_record
 
 
 def process_row(row: dict, cfg, generator):
     """Process a single Parquet row.
 
-    Returns (doc_text, metadata_jsonl, error_jsonl, split).
+    Returns (doc_text, metadata_dict, error_dict, split).
     """
     split = row["split"]
     entry_id = row["entry_id"]
@@ -54,36 +51,32 @@ def process_row(row: dict, cfg, generator):
             canonical_residue_policy=cfg.filters.canonical_residue_policy,
         )
         if isinstance(result, str):
-            err = make_error_record(entry, result)
-            return None, None, error_to_jsonl(err), split
+            return None, None, make_error_record(entry, result), split
 
         gen_result = generator.generate(result, cfg)
         if isinstance(gen_result, str):
-            # Error reason string
-            err = make_error_record(entry, gen_result)
-            return None, None, error_to_jsonl(err), split
+            return None, None, make_error_record(entry, gen_result), split
 
         meta = make_metadata_record(
             entry, result, gen_result.contacts_pre_filter,
             gen_result.contacts_emitted, gen_result.doc_text, cfg,
         )
-        return gen_result.doc_text, metadata_to_jsonl(meta), None, split
+        return gen_result.doc_text, meta, None, split
 
     except Exception:
         err = make_error_record(entry, "exception", traceback.format_exc())
-        return None, None, error_to_jsonl(err), split
+        return None, None, err, split
 
 
 def shard_already_generated(output_dir: str, shard_index: int) -> bool:
     """Check if this shard has already been generated (any split output exists)."""
-    from pathlib import Path
     output_path = Path(output_dir)
-    shard_name = f"shard={shard_index:06d}"
+    shard_name = f"shard_{shard_index:06d}"
     for split in ("train", "val", "test"):
-        split_dir = output_path / f"split={split}"
-        if (split_dir / f"{shard_name}.txt.gz").exists():
+        split_dir = output_path / split
+        if (split_dir / f"{shard_name}.parquet").exists():
             return True
-        if (split_dir / f"{shard_name}.errors.jsonl.gz").exists():
+        if (split_dir / f"{shard_name}.errors.parquet").exists():
             return True
     return False
 
@@ -115,12 +108,12 @@ def main(config_path: str, parquet_shards: tuple[str, ...], shard_index: int,
         table = pq.read_table(parquet_shard)
         for i in range(len(table)):
             row = {col: table.column(col)[i].as_py() for col in table.column_names}
-            doc_text, meta_jsonl, err_jsonl, split = process_row(row, cfg, generator)
+            doc_text, meta, err, split = process_row(row, cfg, generator)
             if doc_text is not None:
-                writer.add_document(split, doc_text, meta_jsonl)
+                writer.add_document(split, doc_text, meta)
                 success_count += 1
-            if err_jsonl is not None:
-                writer.add_error(split, err_jsonl)
+            if err is not None:
+                writer.add_error(split, err)
                 error_count += 1
         del table
 

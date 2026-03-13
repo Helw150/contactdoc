@@ -208,24 +208,21 @@ uv run python scripts/generate_docs.py \
 ### Output Structure
 
 ```
-output/results/
-  split=train/
-    shard=000000.txt.gz                 # concatenated training documents
-    shard=000000.metadata.jsonl.gz      # one JSON record per document
-    shard=000000.errors.jsonl.gz        # skipped/failed entries
-    shard=000001.txt.gz
+output/results/deterministic-positives-only/
+  train/
+    shard_000000.parquet             # documents + metadata
+    shard_000000.errors.parquet      # skipped/failed entries
+    shard_000001.parquet
     ...
-  split=val/
-    shard=000000.txt.gz
+  val/
+    shard_000000.parquet
     ...
-  split=test/
-    shard=000000.txt.gz
+  test/
+    shard_000000.parquet
     ...
 ```
 
-- **txt.gz** — concatenated documents, each ending with `<end>\n`, separated by `<end_of_document>\n`
-- **metadata.jsonl.gz** — per-document metadata (entry ID, pLDDT, contact count, split, SHA1 of document text, etc.)
-- **errors.jsonl.gz** — entries that were skipped (parse failures, no contacts after filtering, etc.)
+Each document parquet file contains columns: `document` (full text), `entry_id`, `uniprot_accession`, `tax_id`, `organism_name`, `global_plddt`, `seq_len`, `contacts_pre_filter`, `contacts_emitted`, `residues_passing_plddt`, `split`, `seq_cluster_id`, `struct_cluster_id`, `split_cluster_id`, `sha1`.
 
 ### Legacy: One-Step Process (download + generate combined)
 
